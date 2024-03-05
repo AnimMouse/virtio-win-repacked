@@ -1,0 +1,121 @@
+name: Repack Windows VirtIO Drivers
+on:
+  schedule:
+    - cron: '7 11 * * 0'
+  workflow_dispatch:
+  watch:
+    types: [started]
+    
+concurrency:
+  group: ${{ github.workflow }}
+  
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get virtio-win latest version
+        id: virtio-win-info
+        run: |
+          url=$(curl -sLI -o /dev/null -w %{url_effective} https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso)
+          version_revision=${url:91:9}
+          echo version-revision=$version_revision >> $GITHUB_OUTPUT
+          echo version=${version_revision::7} >> $GITHUB_OUTPUT
+          
+      - name: Get virtio-win current version
+        id: virtio-win-current
+        run: echo version=$(gh api repos/$GITHUB_REPOSITORY/releases/latest -q .tag_name) >> $GITHUB_OUTPUT
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          
+      - name: Check if there is newer version
+        run: '[[ "${{ steps.virtio-win-info.outputs.version-revision }}" != "${{ steps.virtio-win-current.outputs.version }}" ]]'
+        
+    outputs:
+      version-revision: ${{ steps.virtio-win-info.outputs.version-revision }}
+      version: ${{ steps.virtio-win-info.outputs.version }}
+      
+  download:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download virtio-win ISO
+        run: aria2c -x 16 -o virtio-win.iso "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-${{ needs.check.outputs.version-revision }}/virtio-win-${{ needs.check.outputs.version }}.iso"
+        
+      - name: Upload virtio-win ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtio-win
+          path: virtio-win.iso
+          retention-days: 1
+          
+  repack:
+    needs: [check, download]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        driver: [Balloon, fwcfg, NetKVM, pvpanic, qemufwcfg, qemupciserial, qxl, qxldod, smbus, sriov, viofs, viogpudo, vioinput, viorng, vioscsi, vioserial, viostor]
+        
+    steps:
+      - name: Install genisoimage
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: genisoimage
+          
+      - name: Download virtio-win ISO
+        uses: actions/download-artifact@v4
+        with:
+          name: virtio-win
+          
+      - name: Mount virtio-win ISO
+        run: |
+          mkdir virtio-win
+          sudo mount -o loop virtio-win.iso virtio-win
+          
+      - name: Create and compress ${{ matrix.driver }} ISO
+        run: genisoimage -Jr -udf -V "virtio-win-${{ needs.check.outputs.version-revision }}-${{ matrix.driver }}" "virtio-win/${{ matrix.driver }}" | zstd -T0 -19 -o "virtio-win-${{ needs.check.outputs.version-revision }}-${{ matrix.driver }}.iso.zst"
+        
+      - name: Unmount virtio-win ISO
+        run: sudo umount virtio-win
+        
+      - name: Upload ${{ matrix.driver }} ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtio-win-driver-${{ matrix.driver }}
+          path: virtio-win-${{ needs.check.outputs.version-revision }}-${{ matrix.driver }}.iso.zst
+          retention-days: 1
+          compression-level: 0
+          
+  release:
+    needs: [check, download, repack]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download virtio-win drivers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: virtio-win-driver-*
+          merge-multiple: true
+          
+      - name: Release virtio-win drivers
+        run: >
+          gh release create "${{ needs.check.outputs.version-revision }}"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-Balloon.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-fwcfg.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-NetKVM.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-pvpanic.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-qemufwcfg.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-qemupciserial.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-qxl.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-qxldod.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-smbus.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-sriov.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-viofs.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-viogpudo.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-vioinput.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-viorng.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-vioscsi.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-vioserial.iso.zst"
+          "virtio-win-${{ needs.check.outputs.version-revision }}-viostor.iso.zst"
+          -n "Windows VirtIO Drivers ${{ needs.check.outputs.version-revision }} repacked" -t "virtio-win ${{ needs.check.outputs.version-revision }}"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
